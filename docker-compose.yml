@@ -1,0 +1,48 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: btfly_api
+    ports:
+      - "8080:8080"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ConnectionStrings__DefaultConnection=Host=db;Port=5432;Database=btfly;Username=btfly;Password=btfly_dev_password
+      - Cloudlight__BaseUrl=https://api.login.btfly.social
+      - Cloudlight__Issuer=https://api.login.btfly.social
+      - Cloudlight__Audience=btfly-node
+      - Cloudlight__JwksUrl=https://api.login.btfly.social/.well-known/jwks.json
+      - BTFLY__NODEPRIVATEKEYB64=${BTFLY_NODE_PRIVATE_KEY_B64:-}
+      - BTFLY__NODEPUBLICKEYB64=${BTFLY_NODE_PUBLIC_KEY_B64:-}
+      - Btfly__JwtIssuer=http://localhost:8080
+      - Btfly__JwtAudience=btfly-node-session
+      - Btfly__TokenExpiryDays=7
+    volumes:
+      # Mount host folder into /app so the auto-generated .env is written back to the host
+      - .:/app/host-config
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  db:
+    image: postgres:16-alpine
+    container_name: btfly_db
+    environment:
+      POSTGRES_DB:       btfly
+      POSTGRES_USER:     btfly
+      POSTGRES_PASSWORD: btfly_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - btfly_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U btfly -d btfly"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  btfly_pgdata:
