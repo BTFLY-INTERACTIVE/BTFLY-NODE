@@ -30,7 +30,11 @@ if (string.IsNullOrWhiteSpace(privateKeyB64) || string.IsNullOrWhiteSpace(public
 }
 else
 {
-    rsa.ImportFromPem(Encoding.UTF8.GetString(Convert.FromBase64String(privateKeyB64)));
+    var privDecoded = Encoding.UTF8.GetString(Convert.FromBase64String(privateKeyB64));
+    if (privDecoded.TrimStart().StartsWith("<"))
+        rsa.FromXmlString(privDecoded);
+    else
+        rsa.ImportFromPem(privDecoded);
     Console.WriteLine("BTFLY: RSA keys loaded from environment.");
 }
 
@@ -75,11 +79,16 @@ builder.Services.AddSwaggerGen(c =>
     }});
 });
 
+// Cors__AllowedOrigins accepts a comma-separated list of origins.
+// e.g. on Railway: Cors__AllowedOrigins=https://app.btfly.social,https://mynodedomain.com
+var allowedOrigins = (builder.Configuration["Cors__AllowedOrigins"]
+                   ?? builder.Configuration["Cors:AllowedOrigins"]
+                   ?? "http://localhost:8080,http://localhost:3000")
+    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
 builder.Services.AddCors(options =>
     options.AddPolicy("BtflyPolicy", policy =>
-        policy.WithOrigins(
-                builder.Configuration.GetSection("Cors:AllowedOrigins").Get<string[]>()
-                ?? ["https://app.btfly.social", "http://localhost:8080", "http://localhost:3000"])
+        policy.WithOrigins(allowedOrigins)
               .AllowAnyHeader().AllowAnyMethod()));
 
 var port = Environment.GetEnvironmentVariable("PORT") ?? "8080";
