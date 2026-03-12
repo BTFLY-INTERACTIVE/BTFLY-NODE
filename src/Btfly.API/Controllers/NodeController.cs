@@ -8,12 +8,8 @@ namespace Btfly.API.Controllers;
 
 [ApiController]
 [Route("api/nodes")]
-public class NodeController(INodeService nodeService, IConfiguration _config) : ControllerBase
+public class NodeController(INodeService nodeService, IConfiguration config) : ControllerBase
 {
-    /// <summary>
-    /// List all discoverable nodes (Grey and Light only).
-    /// Dark nodes are never publicly listed.
-    /// </summary>
     [HttpGet]
     public async Task<ActionResult<IEnumerable<NodeServerDto>>> ListNodes(
         [FromQuery] ServerType? type = null)
@@ -22,7 +18,6 @@ public class NodeController(INodeService nodeService, IConfiguration _config) : 
         return Ok(nodes);
     }
 
-    /// <summary>Get a specific node by domain.</summary>
     [HttpGet("{domain}")]
     public async Task<ActionResult<NodeServerDto>> GetNode(string domain)
     {
@@ -31,23 +26,25 @@ public class NodeController(INodeService nodeService, IConfiguration _config) : 
     }
 
     /// <summary>
-    /// Register a new node server.
-    /// Protected by BTFLY__ADMINKEY env var if set — pass it as X-Admin-Key header.
-    /// If BTFLY__ADMINKEY is not set, registration is open (useful for first-run setup).
+    /// Register a new node. If Btfly__AdminKey is set, the X-Admin-Key header must match.
+    /// If Btfly__AdminKey is not configured, registration is open.
     /// </summary>
     [HttpPost]
-    public async Task<ActionResult<NodeServerDto>> RegisterNode(
-        [FromBody] RegisterNodeRequest req,
-        [FromHeader(Name = "X-Admin-Key")] string? adminKey)
+    [AllowAnonymous]
+    public async Task<ActionResult<NodeServerDto>> RegisterNode([FromBody] RegisterNodeRequest req)
     {
-        var configuredKey = _config["Btfly:AdminKey"];
-        if (!string.IsNullOrWhiteSpace(configuredKey) && adminKey != configuredKey)
-            return Unauthorized(new { error = "Invalid or missing X-Admin-Key header." });
+        var adminKey = config["Btfly:AdminKey"];
+        if (!string.IsNullOrEmpty(adminKey))
+        {
+            var provided = Request.Headers["X-Admin-Key"].FirstOrDefault();
+            if (provided != adminKey)
+                return Unauthorized(new { error = "Invalid or missing X-Admin-Key header." });
+        }
+
         var node = await nodeService.RegisterNodeAsync(req);
         return CreatedAtAction(nameof(GetNode), new { domain = node.Domain }, node);
     }
 
-    /// <summary>Deactivate a node (platform admin only).</summary>
     [HttpDelete("{nodeId}")]
     [Authorize(Roles = "PlatformAdmin")]
     public async Task<IActionResult> DeactivateNode(Guid nodeId)
