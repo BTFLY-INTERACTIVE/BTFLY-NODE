@@ -8,7 +8,7 @@ namespace Btfly.API.Controllers;
 
 [ApiController]
 [Route("api/nodes")]
-public class NodeController(INodeService nodeService) : ControllerBase
+public class NodeController(INodeService nodeService, IConfiguration _config) : ControllerBase
 {
     /// <summary>
     /// List all discoverable nodes (Grey and Light only).
@@ -30,11 +30,19 @@ public class NodeController(INodeService nodeService) : ControllerBase
         return Ok(node);
     }
 
-    /// <summary>Register a new node server. Requires a valid Cloudlight session.</summary>
+    /// <summary>
+    /// Register a new node server.
+    /// Protected by BTFLY__ADMINKEY env var if set — pass it as X-Admin-Key header.
+    /// If BTFLY__ADMINKEY is not set, registration is open (useful for first-run setup).
+    /// </summary>
     [HttpPost]
-    [Authorize]
-    public async Task<ActionResult<NodeServerDto>> RegisterNode([FromBody] RegisterNodeRequest req)
+    public async Task<ActionResult<NodeServerDto>> RegisterNode(
+        [FromBody] RegisterNodeRequest req,
+        [FromHeader(Name = "X-Admin-Key")] string? adminKey)
     {
+        var configuredKey = _config["Btfly:AdminKey"];
+        if (!string.IsNullOrWhiteSpace(configuredKey) && adminKey != configuredKey)
+            return Unauthorized(new { error = "Invalid or missing X-Admin-Key header." });
         var node = await nodeService.RegisterNodeAsync(req);
         return CreatedAtAction(nameof(GetNode), new { domain = node.Domain }, node);
     }
