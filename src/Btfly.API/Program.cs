@@ -61,6 +61,8 @@ builder.Services.AddSingleton<ITokenService, TokenService>();
 builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddScoped<INodeService, NodeService>();
 builder.Services.AddScoped<IPostService, PostService>();
+builder.Services.AddScoped<IAccountService, AccountService>();
+builder.Services.AddScoped<INotificationService, NotificationService>();
 builder.Services.AddScoped<IModerationService, ModerationService>();
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();

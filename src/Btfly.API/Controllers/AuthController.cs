@@ -9,15 +9,14 @@ namespace Btfly.API.Controllers;
 [Route("api/auth")]
 public class AuthController(IAuthService authService) : ControllerBase
 {
+    private Guid NodeAccountId => Guid.Parse(
+        User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value
+        ?? User.FindFirst("sub")?.Value
+        ?? throw new UnauthorizedAccessException("Missing node account claim."));
+
     /// <summary>
-    /// Step 1 — Node generates a one-time key and gets the Cloudlight login URL.
-    ///
-    /// The node redirects the user to the returned CloudlightLoginUrl.
-    /// After Auth0 login, the user is sent back to the returnUrl (defaults to
-    /// https://{nodeDomain}/auth/complete) with ?btfly_token=...&amp;node_key=...
-    ///
-    /// Pass { "returnUrl": "https://app.btfly.social/" } in the body to redirect
-    /// back to the client app instead of the node domain.
+    /// Step 1 — Generate a one-time login key and get the Cloudlight login URL.
+    /// Pass { "returnUrl": "https://app.btfly.social/" } to redirect tokens back to the client.
     /// </summary>
     [HttpPost("node/{nodeServerId}/generate-key")]
     public async Task<ActionResult<GenerateKeyResponse>> GenerateNodeKey(
@@ -29,11 +28,8 @@ public class AuthController(IAuthService authService) : ControllerBase
     }
 
     /// <summary>
-    /// Step 2 — Complete the node login handshake.
-    ///
-    /// Called by the node after the user returns from Cloudlight auth.
-    /// Validates the BTFLY global token, upserts the local CloudlightAccount mirror,
-    /// and issues a node-scoped JWT for this session.
+    /// Step 2 — Complete the login handshake after Cloudlight auth.
+    /// Returns RequiresUsernameSetup=true for new accounts — prompt user to choose a username.
     /// </summary>
     [HttpPost("node/complete-login")]
     public async Task<ActionResult<NodeLoginResponse>> CompleteNodeLogin(
@@ -41,5 +37,17 @@ public class AuthController(IAuthService authService) : ControllerBase
     {
         var result = await authService.CompleteNodeLoginAsync(req);
         return Ok(result);
+    }
+
+    /// <summary>
+    /// Step 3 (new accounts only) — Set a username after first sign-up.
+    /// Required when NodeLoginResponse.RequiresUsernameSetup is true.
+    /// </summary>
+    [HttpPost("setup-username")]
+    [Authorize]
+    public async Task<ActionResult<NodeAccountDto>> SetupUsername([FromBody] SetupUsernameRequest req)
+    {
+        var account = await authService.SetupUsernameAsync(NodeAccountId, req.Username);
+        return Ok(account);
     }
 }

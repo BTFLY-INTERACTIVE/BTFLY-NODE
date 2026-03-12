@@ -1,6 +1,6 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
-using System.Text.Json;
+using System.Text.RegularExpressions;
 using Btfly.API.Data;
 using Btfly.API.DTOs;
 using Btfly.API.Models.Entities;
@@ -13,20 +13,9 @@ namespace Btfly.API.Services;
 
 public interface IAuthService
 {
-    /// <summary>Generate a one-time node key and return the Cloudlight login URL.</summary>
-    /// <param name="returnUrl">
-    /// Where Cloudlight should redirect after auth. Defaults to https://{nodeDomain}/auth/complete.
-    /// Pass the client app URL to redirect tokens back to the frontend.
-    /// </param>
     Task<GenerateKeyResponse> GenerateNodeKeyAsync(Guid nodeServerId, string? returnUrl = null);
-
-    /// <summary>
-    /// Complete the node login handshake.
-    /// Validates the BTFLY global token from api.login.btfly.social,
-    /// upserts the CloudlightAccount mirror, creates/finds the NodeAccount,
-    /// and issues a node-scoped JWT.
-    /// </summary>
     Task<NodeLoginResponse> CompleteNodeLoginAsync(CompleteNodeLoginRequest req);
+    Task<NodeAccountDto> SetupUsernameAsync(Guid nodeAccountId, string username);
 }
 
 public class AuthService(
@@ -35,17 +24,9 @@ public class AuthService(
     IConfiguration config,
     ILogger<AuthService> log) : IAuthService
 {
-    // ── JWKS config from the central auth service ─────────────────────────────
-    private string CloudlightIssuer =>
-        config["Cloudlight:Issuer"] ?? "https://api.login.btfly.social";
-
-    private string CloudlightAudience =>
-        config["Cloudlight:Audience"] ?? "btfly-node";
-
-    private string CloudlightJwksUrl =>
-        config["Cloudlight:JwksUrl"] ?? "https://api.login.btfly.social/.well-known/jwks.json";
-
-    // ─────────────────────────────────────────────────────────────────────────
+    private string CloudlightIssuer   => config["Cloudlight:Issuer"]   ?? "https://api.login.btfly.social";
+    private string CloudlightAudience => config["Cloudlight:Audience"] ?? "btfly-node";
+    private string CloudlightJwksUrl  => config["Cloudlight:JwksUrl"]  ?? "https://api.login.btfly.social/.well-known/jwks.json";
 
     public async Task<GenerateKeyResponse> GenerateNodeKeyAsync(Guid nodeServerId, string? returnUrl = null)
     {
@@ -63,9 +44,6 @@ public class AuthService(
         await db.SaveChangesAsync();
 
         var baseLoginUrl = config["Cloudlight:BaseUrl"] ?? "https://api.login.btfly.social";
-
-        // Use caller-supplied returnUrl (e.g. the client app) or fall back to node's /auth/complete.
-        // This ensures tokens land on the right page after Cloudlight auth.
         var effectiveReturnUrl = !string.IsNullOrWhiteSpace(returnUrl)
             ? returnUrl
             : $"https://{node.Domain}/auth/complete";
@@ -81,30 +59,27 @@ public class AuthService(
 
     public async Task<NodeLoginResponse> CompleteNodeLoginAsync(CompleteNodeLoginRequest req)
     {
-        // ── 1. Validate the BTFLY global token against the Cloudlight JWKS ────
+        // 1. Validate BTFLY global token
         ClaimsPrincipal principal;
-        try
-        {
-            principal = await ValidateBtflyTokenAsync(req.BtflyToken);
-        }
+        try { principal = await ValidateBtflyTokenAsync(req.BtflyToken); }
         catch (Exception ex)
         {
             log.LogWarning("BTFLY token validation failed: {Message}", ex.Message);
             throw new UnauthorizedAccessException("Invalid or expired Cloudlight token.");
         }
 
-        // ── 2. Extract claims from the validated token ─────────────────────────
-        var auth0Sub     = principal.FindFirstValue(JwtRegisteredClaimNames.Sub)
+        // 2. Extract claims
+        var auth0Sub      = principal.FindFirstValue(JwtRegisteredClaimNames.Sub)
             ?? throw new UnauthorizedAccessException("Token missing sub claim.");
-        var email        = principal.FindFirstValue(JwtRegisteredClaimNames.Email) ?? string.Empty;
-        var displayName  = principal.FindFirstValue("display_name") ?? email;
-        var pictureUrl   = principal.FindFirstValue("picture");
+        var email         = principal.FindFirstValue(JwtRegisteredClaimNames.Email) ?? string.Empty;
+        var displayName   = principal.FindFirstValue("display_name") ?? email;
+        var pictureUrl    = principal.FindFirstValue("picture");
         var emailVerified = principal.FindFirstValue("email_verified") == "true";
 
         if (!emailVerified)
             throw new UnauthorizedAccessException("Email address is not verified.");
 
-        // ── 3. Verify the one-time node key ────────────────────────────────────
+        // 3. Verify one-time node key
         var node = await db.NodeServers
             .FirstOrDefaultAsync(n => n.Domain == req.NodeDomain && n.IsActive)
             ?? throw new KeyNotFoundException($"Node '{req.NodeDomain}' not found or inactive.");
@@ -115,12 +90,11 @@ public class AuthService(
                 k.NodeServerId == node.Id &&
                 !k.IsUsed      &&
                 k.ExpiresAt    > DateTime.UtcNow)
-            ?? throw new UnauthorizedAccessException(
-                "Invalid or expired login key. Please start the login process again.");
+            ?? throw new UnauthorizedAccessException("Invalid or expired login key. Please start the login process again.");
 
         pendingKey.IsUsed = true;
 
-        // ── 4. Upsert CloudlightAccount (mirror of Auth0 identity) ────────────
+        // 4. Upsert CloudlightAccount mirror
         var globalAccount = await db.CloudlightAccounts
             .FirstOrDefaultAsync(a => a.Auth0Sub == auth0Sub);
 
@@ -138,7 +112,6 @@ public class AuthService(
         }
         else
         {
-            // Keep the mirror fresh
             globalAccount.Email       = email;
             globalAccount.DisplayName = displayName;
             globalAccount.PictureUrl  = pictureUrl;
@@ -149,58 +122,107 @@ public class AuthService(
             throw new UnauthorizedAccessException(
                 $"This account has been globally suspended. Reason: {globalAccount.GlobalBanReason}");
 
-        // ── 5. Find or create NodeAccount ──────────────────────────────────────
+        // 5. Find or create NodeAccount
+        bool isNewAccount = false;
         var nodeAccount = await db.NodeAccounts
             .Include(a => a.NodeServer)
+            .Include(a => a.Followers)
+            .Include(a => a.Following)
             .FirstOrDefaultAsync(a =>
                 a.CloudlightAccountId == globalAccount.Id &&
                 a.NodeServerId        == node.Id);
 
         if (nodeAccount == null)
         {
+            isNewAccount = true;
+            // Generate a temporary username from email — user will be prompted to change it
+            var tempUsername = await GenerateTempUsernameAsync(email, node.Id);
             nodeAccount = new NodeAccount
             {
-                CloudlightAccountId = globalAccount.Id,
-                NodeServerId        = node.Id,
-                Username            = displayName,
-                AvatarUrl           = pictureUrl,
+                CloudlightAccountId  = globalAccount.Id,
+                NodeServerId         = node.Id,
+                Username             = tempUsername,
+                AvatarUrl            = pictureUrl,
+                RequiresUsernameSetup = true,
             };
             db.NodeAccounts.Add(nodeAccount);
-            log.LogInformation("New NodeAccount created for {Sub} on {Domain}",
-                auth0Sub, node.Domain);
+            log.LogInformation("New NodeAccount created for {Sub} on {Domain}", auth0Sub, node.Domain);
         }
 
         await db.SaveChangesAsync();
 
-        // ── 6. Issue node-scoped JWT ───────────────────────────────────────────
         var nodeToken = tokens.GenerateNodeToken(nodeAccount, globalAccount);
         var dto       = MapNodeAccount(nodeAccount, globalAccount);
 
-        return new NodeLoginResponse(nodeToken, dto);
+        return new NodeLoginResponse(nodeToken, dto, nodeAccount.RequiresUsernameSetup);
     }
 
-    // ── JWT validation against Cloudlight JWKS ────────────────────────────────
+    public async Task<NodeAccountDto> SetupUsernameAsync(Guid nodeAccountId, string username)
+    {
+        // Validate username format
+        if (string.IsNullOrWhiteSpace(username) || username.Length < 2 || username.Length > 30)
+            throw new ArgumentException("Username must be between 2 and 30 characters.");
+
+        if (!Regex.IsMatch(username, @"^[a-zA-Z0-9_]+$"))
+            throw new ArgumentException("Username can only contain letters, numbers, and underscores.");
+
+        var nodeAccount = await db.NodeAccounts
+            .Include(a => a.NodeServer)
+            .Include(a => a.CloudlightAccount)
+            .Include(a => a.Followers)
+            .Include(a => a.Following)
+            .FirstOrDefaultAsync(a => a.Id == nodeAccountId)
+            ?? throw new KeyNotFoundException("Node account not found.");
+
+        // Check uniqueness on this node
+        var taken = await db.NodeAccounts.AnyAsync(a =>
+            a.NodeServerId == nodeAccount.NodeServerId &&
+            a.Username.ToLower() == username.ToLower() &&
+            a.Id != nodeAccountId);
+
+        if (taken)
+            throw new InvalidOperationException($"Username '{username}' is already taken on this node.");
+
+        nodeAccount.Username             = username;
+        nodeAccount.RequiresUsernameSetup = false;
+        await db.SaveChangesAsync();
+
+        return MapNodeAccount(nodeAccount, nodeAccount.CloudlightAccount);
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    private async Task<string> GenerateTempUsernameAsync(string email, Guid nodeServerId)
+    {
+        // e.g. "alice@example.com" → "alice" then "alice_1" if taken
+        var base_ = Regex.Replace(email.Split('@')[0], @"[^a-zA-Z0-9_]", "_");
+        base_ = base_[..Math.Min(base_.Length, 20)];
+
+        var candidate = base_;
+        var suffix = 1;
+        while (await db.NodeAccounts.AnyAsync(a =>
+            a.NodeServerId == nodeServerId &&
+            a.Username.ToLower() == candidate.ToLower()))
+        {
+            candidate = $"{base_}_{suffix++}";
+        }
+        return candidate;
+    }
 
     private async Task<ClaimsPrincipal> ValidateBtflyTokenAsync(string token)
     {
-        // Fetch the JWKS from the central auth service (cached by ConfigurationManager)
         var configManager = new ConfigurationManager<OpenIdConnectConfiguration>(
             $"{CloudlightIssuer}/.well-known/openid-configuration",
             new OpenIdConnectConfigurationRetriever(),
             new HttpDocumentRetriever());
 
         OpenIdConnectConfiguration oidcConfig;
-        try
-        {
-            oidcConfig = await configManager.GetConfigurationAsync();
-        }
+        try { oidcConfig = await configManager.GetConfigurationAsync(); }
         catch
         {
-            // Fall back to fetching JWKS directly if discovery doc isn't available
-            var jwksRetriever = new ConfigurationManager<OpenIdConnectConfiguration>(
-                CloudlightJwksUrl,
-                new OpenIdConnectConfigurationRetriever());
-            oidcConfig = await jwksRetriever.GetConfigurationAsync();
+            var fallback = new ConfigurationManager<OpenIdConnectConfiguration>(
+                CloudlightJwksUrl, new OpenIdConnectConfigurationRetriever());
+            oidcConfig = await fallback.GetConfigurationAsync();
         }
 
         var validationParams = new TokenValidationParameters
@@ -215,19 +237,17 @@ public class AuthService(
         };
 
         var handler = new JwtSecurityTokenHandler();
-        // Don't remap claim names to long Microsoft URIs — keep "sub", "email" etc as-is
         handler.InboundClaimTypeMap.Clear();
         return handler.ValidateToken(token, validationParams, out _);
     }
 
-    private static NodeAccountDto MapNodeAccount(NodeAccount a, CloudlightAccount g) => new(
-        a.Id,
-        a.Username,
-        a.Bio,
-        a.AvatarUrl,
+    internal static NodeAccountDto MapNodeAccount(NodeAccount a, CloudlightAccount g) => new(
+        a.Id, a.Username, a.Bio, a.AvatarUrl, a.HeaderUrl, a.WebsiteUrl, a.Location,
         a.NodeServer?.Domain ?? string.Empty,
-        g.IsPro,
+        g.IsPro, a.IsNodeAdmin,
         a.Followers?.Count ?? 0,
         a.Following?.Count ?? 0,
+        0, // PostCount fetched separately when needed
+        a.RequiresUsernameSetup,
         a.JoinedAt);
 }

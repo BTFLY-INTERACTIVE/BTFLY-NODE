@@ -4,28 +4,23 @@ namespace Btfly.API.DTOs;
 
 // ─── Auth ─────────────────────────────────────────────────────────────────────
 
-/// <summary>Step 1: Node generates a one-time key, redirects user to Cloudlight auth.</summary>
-/// <param name="ReturnUrl">
-/// The URL Cloudlight should redirect back to after auth.
-/// Pass the client app URL (e.g. https://app.btfly.social/) so tokens
-/// land on the right page. Defaults to https://{nodeDomain}/auth/complete.
-/// </param>
 public record GenerateKeyRequest(string? ReturnUrl);
-
 public record GenerateKeyResponse(string Key, string CloudlightLoginUrl, DateTime ExpiresAt);
 
+public record CompleteNodeLoginRequest(string BtflyToken, string NodeDomain, string Key);
+
 /// <summary>
-/// Step 2: After Auth0 login at api.login.btfly.social, the user is redirected
-/// back to the node with a BTFLY global token and the original node key.
-/// The node POSTs both here to complete its own session.
+/// Returned after a successful node login.
+/// When RequiresUsernameSetup is true, the client should prompt the user to
+/// choose a username before continuing — call POST /api/auth/setup-username.
 /// </summary>
-public record CompleteNodeLoginRequest(
-    string BtflyToken,   // JWT from api.login.btfly.social
-    string NodeDomain,
-    string Key
+public record NodeLoginResponse(
+    string NodeToken,
+    NodeAccountDto NodeAccount,
+    bool RequiresUsernameSetup
 );
 
-public record NodeLoginResponse(string NodeToken, NodeAccountDto NodeAccount);
+public record SetupUsernameRequest(string Username);
 
 // ─── Node Servers ─────────────────────────────────────────────────────────────
 
@@ -43,10 +38,13 @@ public record NodeServerDto(
     string Domain,
     string DisplayName,
     string? Description,
+    string? BannerUrl,
+    string? IconUrl,
     ServerType ServerType,
     bool IsReplicationOnly,
     bool AllowReadOnlyFederation,
     int MemberCount,
+    int MaxPostLength,
     DateTime RegisteredAt
 );
 
@@ -57,36 +55,96 @@ public record NodeAccountDto(
     string Username,
     string? Bio,
     string? AvatarUrl,
+    string? HeaderUrl,
+    string? WebsiteUrl,
+    string? Location,
     string NodeDomain,
     bool IsPro,
+    bool IsNodeAdmin,
     int FollowerCount,
     int FollowingCount,
+    int PostCount,
+    bool RequiresUsernameSetup,
     DateTime JoinedAt
 );
 
-public record UpdateProfileRequest(string? Bio, string? AvatarUrl);
+public record UpdateProfileRequest(
+    string? Bio,
+    string? AvatarUrl,
+    string? HeaderUrl,
+    string? WebsiteUrl,
+    string? Location
+);
 
 // ─── Posts ────────────────────────────────────────────────────────────────────
 
-public record CreatePostRequest(string Content, string? MediaUrl, Guid? ParentPostId);
+public record CreatePostRequest(
+    string Content,
+    string? MediaUrl,
+    string? ContentWarning,
+    Guid? ParentPostId
+);
+
+public record EditPostRequest(string Content, string? ContentWarning);
 
 public record PostDto(
     Guid Id,
     string Content,
     string? MediaUrl,
+    string? ContentWarning,
     NodeAccountDto Author,
     Guid? ParentPostId,
+    PostDto? ReflyOf,
     int LikeCount,
     int ReplyCount,
+    int ReflyCount,
+    bool IsLikedByMe,
+    bool IsBookmarkedByMe,
+    bool IsRefliedByMe,
     bool IsReplicated,
     DateTime CreatedAt,
     DateTime? EditedAt
 );
 
+// ─── Follows ──────────────────────────────────────────────────────────────────
+
+public record FollowResponse(bool IsFollowing, int FollowerCount);
+
+// ─── Bookmarks ────────────────────────────────────────────────────────────────
+
+public record BookmarkResponse(bool IsBookmarked);
+
+// ─── Notifications ────────────────────────────────────────────────────────────
+
+public record NotificationDto(
+    Guid Id,
+    NotificationType Type,
+    NodeAccountDto? Actor,
+    PostDto? Post,
+    bool IsRead,
+    DateTime CreatedAt
+);
+
+public record NotificationsResponse(
+    IEnumerable<NotificationDto> Notifications,
+    int UnreadCount,
+    int TotalCount,
+    int Page,
+    int PageSize
+);
+
+// ─── Search ───────────────────────────────────────────────────────────────────
+
+public record SearchResponse(
+    IEnumerable<PostDto> Posts,
+    IEnumerable<NodeAccountDto> Accounts,
+    int TotalPosts,
+    int TotalAccounts
+);
+
 // ─── Moderation ───────────────────────────────────────────────────────────────
 
 public record GlobalBanRequest(string Reason);
-
 public record NodeBanRequest(string Reason, Guid NodeAccountId);
 
 // ─── Feed ─────────────────────────────────────────────────────────────────────

@@ -1,22 +1,14 @@
 namespace Btfly.API.Models.Enums;
 
-public enum ServerType
-{
-    Dark = 0,
-    Grey = 1,
-    Light = 2
-}
+public enum ServerType { Dark = 0, Grey = 1, Light = 2 }
 
-public enum BanScope
-{
-    None = 0,
-    NodeLevel = 1,   // Banned by a specific node operator
-    Global = 2       // Platform-level ban via Cloudlight identity
-}
+public enum AccountRole { User = 0, Moderator = 1, PlatformAdmin = 2 }
 
-public enum AccountRole
+public enum NotificationType
 {
-    User = 0,
-    NodeAdmin = 1,
-    PlatformAdmin = 2
+    Like        = 0,  // Someone liked your post
+    Reply       = 1,  // Someone replied to your post
+    Follow      = 2,  // Someone followed you
+    Mention     = 3,  // Someone mentioned you in a post
+    Refly       = 4,  // Someone reflyed your post
 }

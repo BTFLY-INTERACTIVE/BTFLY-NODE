@@ -79,6 +79,7 @@ public class NodeService(BtflyDbContext db) : INodeService
 
     private static NodeServerDto MapNode(NodeServer n, int memberCount) => new(
         n.Id, n.Domain, n.DisplayName, n.Description,
+        n.BannerUrl, n.IconUrl,
         n.ServerType, n.IsReplicationOnly, n.AllowReadOnlyFederation,
-        memberCount, n.RegisteredAt);
+        memberCount, n.MaxPostLength, n.RegisteredAt);
 }
