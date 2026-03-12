@@ -215,6 +215,8 @@ public class AuthService(
         };
 
         var handler = new JwtSecurityTokenHandler();
+        // Don't remap claim names to long Microsoft URIs — keep "sub", "email" etc as-is
+        handler.InboundClaimTypeMap.Clear();
         return handler.ValidateToken(token, validationParams, out _);
     }
 
