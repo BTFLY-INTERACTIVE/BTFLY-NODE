@@ -15,7 +15,7 @@ builder.Services.AddDbContext<BtflyDbContext>(options =>
     options.UseNpgsql(builder.Configuration.GetConnectionString("DefaultConnection"));
     options.ConfigureWarnings(w =>
         w.Ignore(Microsoft.EntityFrameworkCore.Diagnostics.RelationalEventId.PendingModelChangesWarning));
-});
+}, contextLifetime: ServiceLifetime.Transient);
 
 var rsa = RSA.Create(2048);
 var privateKeyB64 = builder.Configuration["Btfly:NodePrivateKeyB64"];

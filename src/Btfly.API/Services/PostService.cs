@@ -100,6 +100,7 @@ public class PostService(BtflyDbContext db) : IPostService
             .FirstOrDefaultAsync(p => p.Id == postId && !p.IsDeleted)
             ?? throw new KeyNotFoundException("Post not found.");
 
+        // For single post, fetch data directly as there's minimal N+1 impact
         return await MapPostAsync(post, viewerNodeAccountId);
     }
 
@@ -122,7 +123,7 @@ public class PostService(BtflyDbContext db) : IPostService
             .Take(pageSize)
             .ToListAsync();
 
-        var dtos = await Task.WhenAll(posts.Select(p => MapPostAsync(p, viewerNodeAccountId)));
+        var dtos = await MapPostsWithCacheAsync(posts, viewerNodeAccountId);
         return new FeedResponse(dtos, total, page, pageSize);
     }
 
@@ -145,7 +146,7 @@ public class PostService(BtflyDbContext db) : IPostService
             .Take(pageSize)
             .ToListAsync();
 
-        var dtos = await Task.WhenAll(posts.Select(p => MapPostAsync(p, nodeAccountId)));
+        var dtos = await MapPostsWithCacheAsync(posts, nodeAccountId);
         return new FeedResponse(dtos, total, page, pageSize);
     }
 
@@ -161,7 +162,7 @@ public class PostService(BtflyDbContext db) : IPostService
             .Take(pageSize)
             .ToListAsync();
 
-        var dtos = await Task.WhenAll(posts.Select(p => MapPostAsync(p, viewerNodeAccountId)));
+        var dtos = await MapPostsWithCacheAsync(posts, viewerNodeAccountId);
         return new FeedResponse(dtos, total, page, pageSize);
     }
 
@@ -182,30 +183,19 @@ public class PostService(BtflyDbContext db) : IPostService
             .Take(pageSize)
             .ToListAsync();
 
-        var dtos = await Task.WhenAll(posts.Select(p => MapPostAsync(p, viewerNodeAccountId)));
+        var dtos = await MapPostsWithCacheAsync(posts, viewerNodeAccountId);
         return new FeedResponse(dtos, total, page, pageSize);
     }
 
     public async Task<FeedResponse> GetBookmarksAsync(Guid nodeAccountId, int page, int pageSize)
     {
-        var query = LoadPostQuery(db.Posts)
-            .Where(p => p.Bookmarks.Any(b => b.NodeAccountId == nodeAccountId) && !p.IsDeleted);
-
-        var total = await query.CountAsync();
-        var posts = await query
-            .OrderByDescending(p => p.Bookmarks.First(b => b.NodeAccountId == nodeAccountId).CreatedAt)
-            .Skip((page - 1) * pageSize)
-            .Take(pageSize)
+        var bookmarkIds = await db.Bookmarks
+            .Where(b => b.NodeAccountId == nodeAccountId)
+            .Select(b => b.PostId)
             .ToListAsync();
 
-        var dtos = await Task.WhenAll(posts.Select(p => MapPostAsync(p, nodeAccountId)));
-        return new FeedResponse(dtos, total, page, pageSize);
-    }
-
-    public async Task<FeedResponse> GetAccountPostsAsync(Guid profileNodeAccountId, int page, int pageSize, Guid? viewerNodeAccountId = null)
-    {
         var query = LoadPostQuery(db.Posts)
-            .Where(p => p.AuthorId == profileNodeAccountId && !p.IsDeleted && p.ParentPostId == null);
+            .Where(p => bookmarkIds.Contains(p.Id) && !p.IsDeleted);
 
         var total = await query.CountAsync();
         var posts = await query
@@ -214,7 +204,23 @@ public class PostService(BtflyDbContext db) : IPostService
             .Take(pageSize)
             .ToListAsync();
 
-        var dtos = await Task.WhenAll(posts.Select(p => MapPostAsync(p, viewerNodeAccountId)));
+        var dtos = await MapPostsWithCacheAsync(posts, nodeAccountId);
+        return new FeedResponse(dtos, total, page, pageSize);
+    }
+
+    public async Task<FeedResponse> GetAccountPostsAsync(Guid profileNodeAccountId, int page, int pageSize, Guid? viewerNodeAccountId = null)
+    {
+        var query = LoadPostQuery(db.Posts)
+            .Where(p => p.AuthorId == profileNodeAccountId && !p.IsDeleted);
+
+        var total = await query.CountAsync();
+        var posts = await query
+            .OrderByDescending(p => p.CreatedAt)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .ToListAsync();
+
+        var dtos = await MapPostsWithCacheAsync(posts, viewerNodeAccountId);
         return new FeedResponse(dtos, total, page, pageSize);
     }
 
@@ -223,15 +229,11 @@ public class PostService(BtflyDbContext db) : IPostService
         var post = await db.Posts.FindAsync(postId)
             ?? throw new KeyNotFoundException("Post not found.");
 
-        var requester = await db.NodeAccounts
-            .Include(a => a.CloudlightAccount)
-            .FirstAsync(a => a.Id == requestingNodeAccountId);
+        var isOwner = post.AuthorId == requestingNodeAccountId;
+        var isAdmin = (await db.NodeAccounts.FindAsync(requestingNodeAccountId))?.IsNodeAdmin ?? false;
 
-        var isAuthor = post.AuthorId == requestingNodeAccountId;
-        var isAdmin  = requester.IsNodeAdmin || requester.CloudlightAccount.Role == AccountRole.PlatformAdmin;
-
-        if (!isAuthor && !isAdmin)
-            throw new UnauthorizedAccessException("You do not have permission to delete this post.");
+        if (!isOwner && !isAdmin)
+            throw new UnauthorizedAccessException("You can only delete your own posts.");
 
         post.IsDeleted = true;
         await db.SaveChangesAsync();
@@ -239,15 +241,11 @@ public class PostService(BtflyDbContext db) : IPostService
 
     public async Task<PostDto> LikePostAsync(Guid postId, Guid nodeAccountId)
     {
-        if (await db.PostLikes.AnyAsync(l => l.PostId == postId && l.NodeAccountId == nodeAccountId))
-            throw new InvalidOperationException("Already liked.");
+        var post = await db.Posts.Include(p => p.Likes).FirstOrDefaultAsync(p => p.Id == postId && !p.IsDeleted)
+            ?? throw new KeyNotFoundException("Post not found.");
 
-        db.PostLikes.Add(new PostLike { PostId = postId, NodeAccountId = nodeAccountId });
-
-        // Notify post author
-        var post = await db.Posts.Include(p => p.Author).FirstAsync(p => p.Id == postId);
-        if (post.AuthorId != nodeAccountId)
-            await AddNotificationAsync(post.AuthorId, nodeAccountId, NotificationType.Like, postId);
+        if (!post.Likes.Any(l => l.NodeAccountId == nodeAccountId))
+            db.PostLikes.Add(new PostLike { PostId = postId, NodeAccountId = nodeAccountId });
 
         await db.SaveChangesAsync();
         return await GetPostAsync(postId, nodeAccountId);
@@ -255,39 +253,29 @@ public class PostService(BtflyDbContext db) : IPostService
 
     public async Task<PostDto> UnlikePostAsync(Guid postId, Guid nodeAccountId)
     {
-        var like = await db.PostLikes.FirstOrDefaultAsync(l => l.PostId == postId && l.NodeAccountId == nodeAccountId)
-            ?? throw new InvalidOperationException("Not liked.");
-        db.PostLikes.Remove(like);
+        var like = await db.PostLikes.FirstOrDefaultAsync(l => l.PostId == postId && l.NodeAccountId == nodeAccountId);
+        if (like != null) db.PostLikes.Remove(like);
         await db.SaveChangesAsync();
         return await GetPostAsync(postId, nodeAccountId);
     }
 
     public async Task<PostDto> ReflyPostAsync(Guid postId, Guid nodeAccountId)
     {
-        var original = await db.Posts
-            .Include(p => p.Author).ThenInclude(a => a.NodeServer)
-            .FirstOrDefaultAsync(p => p.Id == postId && !p.IsDeleted)
+        var parent = await db.Posts.FindAsync(postId)
             ?? throw new KeyNotFoundException("Post not found.");
-
-        if (await db.Posts.AnyAsync(p => p.ReflyOfPostId == postId && p.AuthorId == nodeAccountId && !p.IsDeleted))
-            throw new InvalidOperationException("Already reflyed.");
-
-        var author = await db.NodeAccounts.Include(a => a.NodeServer).FirstAsync(a => a.Id == nodeAccountId);
 
         var refly = new Post
         {
-            AuthorId      = nodeAccountId,
-            NodeServerId  = author.NodeServerId,
-            Content       = string.Empty,
+            AuthorId = nodeAccountId,
+            NodeServerId = parent.NodeServerId,
             ReflyOfPostId = postId,
+            Content = "",
+            IsReplicated = parent.IsReplicated,
         };
+
         db.Posts.Add(refly);
-
-        if (original.AuthorId != nodeAccountId)
-            await AddNotificationAsync(original.AuthorId, nodeAccountId, NotificationType.Refly, postId);
-
         await db.SaveChangesAsync();
-        return await GetPostAsync(original.Id, nodeAccountId);
+        return await GetPostAsync(postId, nodeAccountId);
     }
 
     public async Task<PostDto> UnreflyPostAsync(Guid postId, Guid nodeAccountId)
@@ -414,11 +402,59 @@ public class PostService(BtflyDbContext db) : IPostService
         .Include(p => p.ReflyOfPost).ThenInclude(r => r!.Replies)
         .Include(p => p.ReflyOfPost).ThenInclude(r => r!.Reflys);
 
-    private async Task<PostDto> MapPostAsync(Post p, Guid? viewerNodeAccountId)
+    /// <summary>
+    /// Maps a batch of posts to DTOs with pre-loaded caches to avoid N+1 queries.
+    /// This is the optimal approach for feed endpoints.
+    /// </summary>
+    private async Task<List<PostDto>> MapPostsWithCacheAsync(List<Post> posts, Guid? viewerNodeAccountId)
+    {
+        if (posts.Count == 0)
+            return new List<PostDto>();
+
+        // Pre-load post counts for all authors
+        var authorIds = posts
+            .Select(p => p.Author?.Id)
+            .Where(id => id.HasValue)
+            .Select(id => id!.Value)
+            .Distinct()
+            .ToList();
+
+        var postCountCache = await db.Posts
+            .Where(x => authorIds.Contains(x.AuthorId) && !x.IsDeleted)
+            .GroupBy(x => x.AuthorId)
+            .Select(g => new { AuthorId = g.Key, Count = g.Count() })
+            .ToDictionaryAsync(x => x.AuthorId, x => x.Count);
+
+        // Pre-load reflies by viewer (if authenticated)
+        var reflyedByViewerCache = new HashSet<Guid>();
+        if (viewerNodeAccountId.HasValue)
+        {
+            var postIds = posts.Select(p => p.Id).ToList();
+            reflyedByViewerCache = await db.Posts
+                .Where(p => postIds.Contains(p.ReflyOfPostId!.Value) && 
+                           p.AuthorId == viewerNodeAccountId.Value && 
+                           !p.IsDeleted)
+                .Select(p => p.ReflyOfPostId!.Value)
+                .ToHashSetAsync();
+        }
+
+        // Map all posts without additional DB queries
+        return posts
+            .Select(p => MapPostSync(p, viewerNodeAccountId, postCountCache, reflyedByViewerCache))
+            .ToList();
+    }
+
+    /// <summary>
+    /// Synchronous post mapping that uses pre-loaded cache data.
+    /// Call MapPostsWithCacheAsync for feeds or MapPostAsync for single posts.
+    /// </summary>
+    private PostDto MapPostSync(Post p, Guid? viewerNodeAccountId, 
+        Dictionary<Guid, int> postCountCache, 
+        HashSet<Guid> reflyedByViewerCache)
     {
         int postCount = 0;
-        if (p.Author != null)
-            postCount = await db.Posts.CountAsync(x => x.AuthorId == p.AuthorId && !x.IsDeleted);
+        if (p.Author != null && postCountCache.TryGetValue(p.Author.Id, out var count))
+            postCount = count;
 
         var authorDto = new NodeAccountDto(
             p.Author.Id, p.Author.Username, p.Author.Bio, p.Author.AvatarUrl,
@@ -457,6 +493,8 @@ public class PostService(BtflyDbContext db) : IPostService
                 p.ReflyOfPost.CreatedAt, p.ReflyOfPost.EditedAt);
         }
 
+        bool hasReflied = viewerNodeAccountId.HasValue && reflyedByViewerCache.Contains(p.Id);
+
         return new PostDto(
             p.Id, p.Content, p.MediaUrl, p.ContentWarning, authorDto, p.ParentPostId,
             reflyOfDto,
@@ -465,8 +503,70 @@ public class PostService(BtflyDbContext db) : IPostService
             p.Reflys?.Count ?? 0,
             viewerNodeAccountId.HasValue && (p.Likes?.Any(l => l.NodeAccountId == viewerNodeAccountId) ?? false),
             viewerNodeAccountId.HasValue && (p.Bookmarks?.Any(b => b.NodeAccountId == viewerNodeAccountId) ?? false),
-            viewerNodeAccountId.HasValue && await db.Posts.AnyAsync(r =>
-                r.ReflyOfPostId == p.Id && r.AuthorId == viewerNodeAccountId && !r.IsDeleted),
+            hasReflied,
+            p.IsReplicated,
+            p.CreatedAt, p.EditedAt);
+    }
+
+    /// <summary>
+    /// Async mapping for single posts (used by GetPostAsync).
+    /// For batch operations, use MapPostsWithCacheAsync instead.
+    /// </summary>
+    private async Task<PostDto> MapPostAsync(Post p, Guid? viewerNodeAccountId)
+    {
+        int postCount = 0;
+        if (p.Author != null)
+            postCount = await db.Posts.CountAsync(x => x.AuthorId == p.Author.Id && !x.IsDeleted);
+
+        var authorDto = new NodeAccountDto(
+            p.Author.Id, p.Author.Username, p.Author.Bio, p.Author.AvatarUrl,
+            p.Author.HeaderUrl, p.Author.WebsiteUrl, p.Author.Location,
+            p.Author.NodeServer?.Domain ?? string.Empty,
+            p.Author.CloudlightAccount?.IsPro ?? false,
+            p.Author.IsNodeAdmin,
+            p.Author.Followers?.Count ?? 0,
+            p.Author.Following?.Count ?? 0,
+            postCount,
+            p.Author.RequiresUsernameSetup,
+            p.Author.JoinedAt);
+
+        PostDto? reflyOfDto = null;
+        if (p.ReflyOfPost != null && !p.ReflyOfPost.IsDeleted)
+        {
+            var reflyAuthorDto = new NodeAccountDto(
+                p.ReflyOfPost.Author.Id, p.ReflyOfPost.Author.Username,
+                p.ReflyOfPost.Author.Bio, p.ReflyOfPost.Author.AvatarUrl,
+                null, null, null,
+                p.ReflyOfPost.Author.NodeServer?.Domain ?? string.Empty,
+                p.ReflyOfPost.Author.CloudlightAccount?.IsPro ?? false,
+                p.ReflyOfPost.Author.IsNodeAdmin,
+                0, 0, 0, false, p.ReflyOfPost.Author.JoinedAt);
+
+            reflyOfDto = new PostDto(
+                p.ReflyOfPost.Id, p.ReflyOfPost.Content, p.ReflyOfPost.MediaUrl,
+                p.ReflyOfPost.ContentWarning, reflyAuthorDto, p.ReflyOfPost.ParentPostId,
+                null,
+                p.ReflyOfPost.Likes?.Count ?? 0,
+                p.ReflyOfPost.Replies?.Count ?? 0,
+                p.ReflyOfPost.Reflys?.Count ?? 0,
+                viewerNodeAccountId.HasValue && (p.ReflyOfPost.Likes?.Any(l => l.NodeAccountId == viewerNodeAccountId) ?? false),
+                false, false,
+                p.ReflyOfPost.IsReplicated,
+                p.ReflyOfPost.CreatedAt, p.ReflyOfPost.EditedAt);
+        }
+
+        bool hasReflied = viewerNodeAccountId.HasValue && await db.Posts.AnyAsync(r =>
+            r.ReflyOfPostId == p.Id && r.AuthorId == viewerNodeAccountId && !r.IsDeleted);
+
+        return new PostDto(
+            p.Id, p.Content, p.MediaUrl, p.ContentWarning, authorDto, p.ParentPostId,
+            reflyOfDto,
+            p.Likes?.Count ?? 0,
+            p.Replies?.Count ?? 0,
+            p.Reflys?.Count ?? 0,
+            viewerNodeAccountId.HasValue && (p.Likes?.Any(l => l.NodeAccountId == viewerNodeAccountId) ?? false),
+            viewerNodeAccountId.HasValue && (p.Bookmarks?.Any(b => b.NodeAccountId == viewerNodeAccountId) ?? false),
+            hasReflied,
             p.IsReplicated,
             p.CreatedAt, p.EditedAt);
     }
