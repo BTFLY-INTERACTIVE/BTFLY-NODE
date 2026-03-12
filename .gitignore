@@ -1,0 +1,6 @@
+.env
+*.user
+.vs/
+bin/
+obj/
+docker-compose.override.yml
